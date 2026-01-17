@@ -1,5 +1,14 @@
 {
   "type": "module",
   "scripts": {
+    "index": "node src/main.js",
+    "manual": "node src/manual.js"
+  },
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "grammy": "^1.36.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1"
   }
 }

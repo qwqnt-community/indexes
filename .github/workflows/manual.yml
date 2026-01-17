@@ -1,0 +1,49 @@
+name: Manual Repository Management
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - add
+          - remove
+      owner:
+        description: 'Repository owner'
+        required: true
+        type: string
+      repo:
+        description: 'Repository name'
+        required: true
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Manual Repository Management
+        env:
+#          CUSTOM_GITHUB_TOKEN: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
+          CUSTOM_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_ORGANIZATION: qwqnt-community
+          MANUAL_ACTION: ${{ github.event.inputs.action }}
+          MANUAL_OWNER: ${{ github.event.inputs.owner }}
+          MANUAL_REPO: ${{ github.event.inputs.repo }}
+        run: node src/manual.js
