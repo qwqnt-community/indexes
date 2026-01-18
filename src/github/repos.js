@@ -34,6 +34,7 @@ export async function getReposByTopic(topic) {
                 repo: item.name,
                 description: item.description || "",
                 default_branch: item.default_branch || "main",
+                stars: item.stargazers_count || 0,
             });
         }
 
@@ -82,7 +83,7 @@ export async function getLatestCommit(owner, repo, branch = "main") {
  * @param {string} owner - 仓库所有者
  * @param {string} repo - 仓库名称
  * @param {string} branch - 分支名称
- * @returns {Promise<Array<{sha: string, message: string}>>}
+ * @returns {Promise<Array<{sha: string, message: string, date: string}>>}
  */
 export async function getRecentCommits(owner, repo, branch = "main") {
     try {
@@ -96,6 +97,7 @@ export async function getRecentCommits(owner, repo, branch = "main") {
         return data.map((commit) => ({
             sha: commit.sha,
             message: commit.commit.message.split("\n")[0],
+            date: commit.commit.author.date,
         }));
     } catch (error) {
         console.error(`Error fetching recent commits for ${owner}/${repo}:`, error.message);
@@ -104,34 +106,29 @@ export async function getRecentCommits(owner, repo, branch = "main") {
 }
 
 /**
- * 获取仓库的最新 release 文件
+ * 获取仓库的最新 release 信息及文件列表
  * @param {string} owner - 仓库所有者
  * @param {string} repo - 仓库名称
- * @returns {Promise<{url: string, name: string} | null>} - 返回下载链接和文件名
+ * @returns {Promise<{tagName: string, publishedAt: string, assets: Array<{url: string, name: string}>} | null>}
  */
-export async function getLatestReleaseAsset(owner, repo) {
+export async function getLatestReleaseInfo(owner, repo) {
     try {
         const { data } = await octokit.rest.repos.getLatestRelease({
             owner,
             repo,
         });
 
-        if (!data.assets || data.assets.length === 0) {
-            return null;
-        }
-
-        const qwqntAsset = data.assets.find(
-            (asset) => asset.name.match(/^qwqnt-.*\.zip$/)
-        );
-
-        return qwqntAsset ? {
-            url: qwqntAsset.browser_download_url,
-            name: qwqntAsset.name
-        } : null;
+        return {
+            tagName: data.tag_name,
+            publishedAt: data.published_at,
+            assets: (data.assets || []).map(asset => ({
+                url: asset.browser_download_url,
+                name: asset.name,
+                size: asset.size
+            }))
+        };
     } catch (error) {
-        if (error.status === 404) {
-            return null;
-        }
+        if (error.status === 404) return null;
         console.error(`Error fetching release for ${owner}/${repo}:`, error.message);
         return null;
     }
@@ -155,6 +152,7 @@ export async function getRepoInfo(owner, repo) {
             repo: data.name,
             description: data.description || "",
             default_branch: data.default_branch || "main",
+            stars: data.stargazers_count || 0,
         };
     } catch (error) {
         console.error(`Error fetching repo info for ${owner}/${repo}:`, error.message);
