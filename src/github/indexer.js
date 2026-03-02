@@ -38,6 +38,30 @@ export async function findTargetRepositories() {
                 for (const item of data.items) {
                     if (item.archived) continue;
 
+                    // Allow valid standard naming conventions:
+                    // kebab-case: /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+                    // snake_case: /^[a-z0-9]+(?:_[a-z0-9]+)*$/
+                    // camelCase: /^[a-z]+[a-zA-Z0-9]*$/
+                    // PascalCase: /^[A-Z][a-zA-Z0-9]*$/
+                    if (item.owner.login !== GITHUB_ORGANIZATION) {
+                        const name = item.name;
+                        const isKebabCase = /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
+                        const isSnakeCase = /^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(name);
+                        const isCamelCase = /^[a-z]+[a-zA-Z0-9]*$/.test(name) && !name.includes('_') && !name.includes('-');
+                        const isPascalCase = /^[A-Z][a-zA-Z0-9]*$/.test(name) && !name.includes('_') && !name.includes('-');
+
+                        const isValidName = isKebabCase || isSnakeCase || isCamelCase || isPascalCase;
+
+                        // Treat the prefix 'qwqnt-' specially if it exists: 
+                        // If it starts with "qwqnt-", the rest must also be a standard convention (e.g., kebab-case or snake_case without extra dashes before capitals)
+                        // The above strict regex handles "qwqnt-Anti-Recall" as FALSE because it mixes hyphens with capital letters (not kebab/snake, nor pure camel/pascal)
+
+                        if (!isValidName) {
+                            console.log(`  Skipping ${item.owner.login}/${item.name} due to non-standard name`);
+                            continue;
+                        }
+                    }
+
                     const repoKey = `${item.owner.login}/${item.name}`;
                     if (processedRepos.has(repoKey)) continue;
 
