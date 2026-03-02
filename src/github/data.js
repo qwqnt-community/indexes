@@ -8,7 +8,7 @@ if (!GITHUB_REPOSITORY) {
     process.exit(1);
 }
 
-const [ owner, repo ] = GITHUB_REPOSITORY.split("/");
+const [owner, repo] = GITHUB_REPOSITORY.split("/");
 const DATA_BRANCH = "data";
 const DATA_PATH_PREFIX = "repos";
 
@@ -96,39 +96,30 @@ export async function getAllTrackedRepos() {
 }
 
 /**
- * 清空 data 分支并切换
+ * 将全部仓库数据转存到 data 分支，并在该分支上创建唯一新提交 (Single-commit storage)
+ * @param {Array<{owner: string, repo: string, message_id: number, commit_id: string}>} allUpdates - 所有的最新数据
  */
-export async function clearDataBranch() {
-    try {
-        await execGit(`git fetch origin ${DATA_BRANCH}`);
-        await execGit(`git checkout ${DATA_BRANCH}`);
+export async function batchSaveRepoData(allUpdates) {
+    if (allUpdates.length === 0) return;
 
+    try {
+        console.log("Preparing to save all repository data to a new isolated commit...");
+
+        // 创建一个孤立分支 (没有历史记录)
+        await execGit(`git checkout --orphan temp_data_branch`);
+
+        // 清空当前工作区中除了 .git 之外的所有内容（实际上 --orphan 后工作区包含原分支内容，我们需要移除它）
         try {
             await execGit(`git rm -rf .`);
         } catch (error) {
             if (!error.message.includes("did not match any files")) throw error;
         }
 
-        await execGit(`git commit -m "Clear data branch" --allow-empty`);
-        console.log("Cleared data branch locally");
-    } catch (error) {
-        console.error("Error clearing data branch:", error.message);
-        throw error;
-    }
-}
-
-/**
- * 批量保存仓库数据并推送到远程
- */
-export async function batchSaveRepoData(updates) {
-    if (updates.length === 0) return;
-
-    try {
-        // 假设已经在 data 分支（由 clearDataBranch 切换）
-        for (const update of updates) {
+        // 把文件写到对应目录
+        for (const update of allUpdates) {
             const dirPath = join(process.cwd(), DATA_PATH_PREFIX, update.owner);
             const filePath = join(dirPath, `${update.repo}.json`);
-            
+
             const content = JSON.stringify({
                 message_id: update.message_id,
                 commit_id: update.commit_id,
@@ -138,15 +129,81 @@ export async function batchSaveRepoData(updates) {
             await fs.writeFile(filePath, content, "utf-8");
         }
 
+        // 提交变更
         await execGit(`git add ${DATA_PATH_PREFIX}`);
         await execGit(`git commit -m "Update repository data [skip ci]"`);
-        await execGit(`git push origin ${DATA_BRANCH} --force`);
-        await execGit(`git checkout main`);
 
-        console.log(`Saved ${updates.length} repository data entries`);
+        // 强制推送到远程的 data 分支
+        await execGit(`git push origin temp_data_branch:${DATA_BRANCH} --force`);
+
+        // 切回主分支，清理临时分支
+        await execGit(`git checkout main`);
+        await execGit(`git branch -D temp_data_branch`);
+
+        console.log(`Saved ${allUpdates.length} repository data entries successfully.`);
     } catch (error) {
         console.error("Error batch saving repository data:", error.message);
+        // 尝试恢复现场
+        try { await execGit(`git checkout main`); } catch (e) { }
         throw error;
     }
+}
+
+/**
+ * 手动保存单个仓库数据 (为 manual.js 使用)
+ * @param {string} repoOwner 
+ * @param {string} repoName 
+ * @param {object} newData 
+ */
+export async function saveRepoData(repoOwner, repoName, newData) {
+    const trackedRepos = await getAllTrackedRepos();
+    const allUpdates = [];
+
+    // 获取现有所有的记录
+    for (const repo of trackedRepos) {
+        if (repo.owner === repoOwner && repo.repo === repoName) continue; // 跳过当前要更新的，后面会加
+
+        const data = await getRepoData(repo.owner, repo.repo);
+        if (data) Object.assign(repo, data);
+        allUpdates.push(repo);
+    }
+
+    // 加入新增的这一个
+    allUpdates.push({
+        owner: repoOwner,
+        repo: repoName,
+        message_id: newData.message_id || 0,
+        commit_id: newData.commit_id || ""
+    });
+
+    await batchSaveRepoData(allUpdates);
+}
+
+/**
+ * 手动删除单个仓库数据 (为 manual.js 使用)
+ * @param {string} repoOwner 
+ * @param {string} repoName 
+ */
+export async function deleteRepoData(repoOwner, repoName) {
+    const trackedRepos = await getAllTrackedRepos();
+    const allUpdates = [];
+
+    let found = false;
+    for (const repo of trackedRepos) {
+        if (repo.owner === repoOwner && repo.repo === repoName) {
+            found = true;
+            continue; // 跳过要删除的这个
+        }
+        const data = await getRepoData(repo.owner, repo.repo);
+        if (data) Object.assign(repo, data);
+        allUpdates.push(repo);
+    }
+
+    if (!found) {
+        console.log(`Repository ${repoOwner}/${repoName} was not tracked.`);
+        return;
+    }
+
+    await batchSaveRepoData(allUpdates);
 }
 

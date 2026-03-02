@@ -37,11 +37,8 @@ jobs:
 
       - name: Index Repositories
         env:
-#          CUSTOM_GITHUB_TOKEN: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
-          CUSTOM_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CUSTOM_GITHUB_TOKEN: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_ORGANIZATION: qwqnt-community
-          PLUGIN_TOPIC: qwqnt-framework-plugin
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_GROUP_ID: ${{ secrets.TG_GROUP_ID }}
           TG_GROUP_TOPIC_ID: ${{ secrets.TG_GROUP_TOPIC_ID }}

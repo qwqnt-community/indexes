@@ -1,20 +1,17 @@
 import {
-    getReposByTopic,
     getLatestCommit,
     getRecentCommits,
     getLatestReleaseInfo,
-    getRepoInfo
+    getRepoInfo,
+    createPullRequestForNewRepo
 } from "./github/repos.js";
-import { getRepoData, getAllTrackedRepos, batchSaveRepoData, clearDataBranch } from "./github/data.js";
+import { getRepoData, getAllTrackedRepos, batchSaveRepoData } from "./github/data.js";
 import { syncRepoMessage } from "./telegram/bot.js";
+import { findTargetRepositories } from "./github/indexer.js";
+import { GITHUB_ORGANIZATION } from "./config.js";
 
-const { GITHUB_ORGANIZATION, PLUGIN_TOPIC, FORCE_RESEND } = process.env;
+const { FORCE_RESEND } = process.env;
 const forceResend = FORCE_RESEND === 'true' || FORCE_RESEND === '1';
-
-if (!GITHUB_ORGANIZATION || !PLUGIN_TOPIC) {
-    console.error("missing required environment variables: GITHUB_ORGANIZATION, PLUGIN_TOPIC");
-    process.exit(1);
-}
 
 /**
  * 处理单个仓库的更新
@@ -65,36 +62,62 @@ async function main() {
     console.log("Starting repository indexing...");
 
     try {
-        const repos = await getReposByTopic(PLUGIN_TOPIC);
+        const repos = await findTargetRepositories();
         const trackedRepos = await getAllTrackedRepos();
-        
-        // 合并所有需要检查的仓库
-        const allRepos = [ ...repos ];
-        for (const tracked of trackedRepos) {
-            if (!repos.some(r => r.owner === tracked.owner && r.repo === tracked.repo)) {
-                const info = await getRepoInfo(tracked.owner, tracked.repo);
-                if (info) allRepos.push(info);
+
+        // 区分应该直接处理的仓库和需要提 PR 的仓库
+        const readyToProcessRepos = [];
+        const externalNewRepos = [];
+
+        for (const repo of repos) {
+            const isTracked = trackedRepos.some(r => r.owner === repo.owner && r.repo === repo.repo);
+            const isInternal = repo.owner === GITHUB_ORGANIZATION;
+
+            if (isTracked || isInternal) {
+                readyToProcessRepos.push(repo);
+            } else {
+                externalNewRepos.push(repo);
             }
         }
 
-        console.log(`Total repositories to check: ${allRepos.length}`);
+        // 确保追踪列表中的仓库即使本次未匹配到（可能 token/rate limt 原因），也要加入处理列表
+        const trackedMap = new Map();
+        for (const tr of trackedRepos) trackedMap.set(`${tr.owner}/${tr.repo}`, tr);
+
+        for (const rp of readyToProcessRepos) {
+            trackedMap.delete(`${rp.owner}/${rp.repo}`);
+        }
+
+        // 抓取剩余 tracked 的详细信息，以防止漏掉
+        for (const [key, tr] of trackedMap.entries()) {
+            const info = await getRepoInfo(tr.owner, tr.repo);
+            if (info) readyToProcessRepos.push(info);
+        }
+
+        console.log(`Total repositories to check: ${readyToProcessRepos.length}`);
+        if (externalNewRepos.length > 0) {
+            console.log(`Discovered ${externalNewRepos.length} external untracked repositories. Will create PRs for them.`);
+        }
+
+        // 处理并创建 PR
+        for (const newRepo of externalNewRepos) {
+            await createPullRequestForNewRepo(newRepo.owner, newRepo.repo);
+        }
 
         // 获取现有数据
         const oldDataMap = new Map();
-        for (const repo of allRepos) {
+        for (const repo of readyToProcessRepos) {
             const data = await getRepoData(repo.owner, repo.repo);
             if (data) oldDataMap.set(`${repo.owner}/${repo.repo}`, data);
         }
 
-        await clearDataBranch();
-
-        const updates = [];
-        for (const repo of allRepos) {
+        const allUpdates = [];
+        for (const repo of readyToProcessRepos) {
             const result = await processRepo(repo, oldDataMap.get(`${repo.owner}/${repo.repo}`));
-            if (result) updates.push(result);
+            if (result) allUpdates.push(result);
         }
 
-        await batchSaveRepoData(updates);
+        await batchSaveRepoData(allUpdates);
         console.log("Repository indexing completed successfully");
     } catch (error) {
         console.error("Error during repository indexing:", error);
