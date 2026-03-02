@@ -7,10 +7,11 @@ import { GITHUB_ORGANIZATION, PLUGIN_TOPIC } from "../config.js";
  */
 export async function findTargetRepositories() {
     const repos = [];
-    const queries = [
-        `org:${GITHUB_ORGANIZATION} topic:${PLUGIN_TOPIC}`,
-        `topic:${PLUGIN_TOPIC}` // Global search
-    ];
+    const queries = [];
+    for (const topic of PLUGIN_TOPIC) {
+        queries.push(`org:${GITHUB_ORGANIZATION} topic:${topic}`);
+        queries.push(`topic:${topic}`); // Global search
+    }
 
     const processedRepos = new Set();
 
@@ -82,7 +83,7 @@ export async function findTargetRepositories() {
                 }
 
                 // Add a small delay for global search to avoid hitting secondary rate limits
-                if (q.includes(`topic:${PLUGIN_TOPIC}`) && hasMore) {
+                if (!q.includes('org:') && hasMore) {
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             } catch (error) {
