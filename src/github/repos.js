@@ -23,52 +23,88 @@ export async function createPullRequestForNewRepo(newOwner, newRepo) {
     const emptyState = JSON.stringify({ message_id: 0, commit_id: "" }, null, 2);
 
     try {
-        console.log(`Creating PR for newly discovered external repository: ${newOwner}/${newRepo}...`);
+        console.log(`Creating/Updating PR for external repository: ${newOwner}/${newRepo}...`);
 
-        // 0. Check if branch already exists
+        // 1. Get default branch sha (main)
+        const { data: repoData } = await octokit.rest.repos.get({ owner: prOwner, repo: prRepo });
+        const defaultBranch = repoData.default_branch;
+
+        // Fetch the CURRENT `data` branch commit sha and tree
+        const { data: dataRef } = await octokit.rest.git.getRef({
+            owner: prOwner,
+            repo: prRepo,
+            ref: `heads/data`
+        });
+        const dataBaseSha = dataRef.object.sha;
+
+        const { data: dataCommit } = await octokit.rest.git.getCommit({
+            owner: prOwner,
+            repo: prRepo,
+            commit_sha: dataBaseSha
+        });
+        const dataTreeSha = dataCommit.tree.sha;
+
+        // 2. Check if a PR branch already exists
+        let branchExists = false;
         try {
             await octokit.rest.git.getRef({
                 owner: prOwner,
                 repo: prRepo,
                 ref: `heads/${branchName}`
             });
-            console.log(`  Branch ${branchName} already exists, skipping PR creation.`);
-            return true;
+            branchExists = true;
         } catch (error) {
-            // If branch does not exist, continue
             if (error.status !== 404) throw error;
         }
 
-        // 1. Get default branch sha (main)
-        const { data: repoData } = await octokit.rest.repos.get({ owner: prOwner, repo: prRepo });
-        const defaultBranch = repoData.default_branch;
-
-        const { data: refData } = await octokit.rest.git.getRef({
+        // 3. Create a new Tree based on the LATEST `data` branch tree, and add our new repo JSON
+        const { data: newTree } = await octokit.rest.git.createTree({
             owner: prOwner,
             repo: prRepo,
-            ref: `heads/data` // PRs merge into data branch
-        });
-        const baseSha = refData.object.sha;
-
-        // 2. Create new branch
-        await octokit.rest.git.createRef({
-            owner: prOwner,
-            repo: prRepo,
-            ref: `refs/heads/${branchName}`,
-            sha: baseSha
+            base_tree: dataTreeSha,
+            tree: [
+                {
+                    path: filePath,
+                    mode: '100644',
+                    type: 'blob',
+                    content: emptyState
+                }
+            ]
         });
 
-        // 3. Create file commit
-        await octokit.rest.repos.createOrUpdateFileContents({
+        // 4. Create a new commit pointing to the new tree, parented by the CURRENT `data` branch
+        const { data: newCommit } = await octokit.rest.git.createCommit({
             owner: prOwner,
             repo: prRepo,
-            path: filePath,
             message: `Add new repository ${newOwner}/${newRepo}`,
-            content: Buffer.from(emptyState).toString("base64"),
-            branch: branchName
+            tree: newTree.sha,
+            parents: [dataBaseSha]
         });
 
-        // 4. Create Pull Request
+        // 5. Update or Create the PR Branch Ref
+        if (branchExists) {
+            console.log(`  Branch ${branchName} already exists. Force updating to sync with latest 'data' branch to resolve potential conflicts...`);
+            await octokit.rest.git.updateRef({
+                owner: prOwner,
+                repo: prRepo,
+                ref: `heads/${branchName}`,
+                sha: newCommit.sha,
+                force: true
+            });
+
+            // Branch has been updated to avoid conflicts. Do not open another PR to prevent duplicate errors.
+            return true;
+        } else {
+            console.log(`  Creating new branch ${branchName}...`);
+            await octokit.rest.git.createRef({
+                owner: prOwner,
+                repo: prRepo,
+                ref: `refs/heads/${branchName}`,
+                sha: newCommit.sha
+            });
+        }
+
+        // 6. Create Pull Request
         const { data: prData } = await octokit.rest.pulls.create({
             owner: prOwner,
             repo: prRepo,
@@ -78,7 +114,7 @@ export async function createPullRequestForNewRepo(newOwner, newRepo) {
             body: `Automatically discovered third-party repository [${newOwner}/${newRepo}](https://github.com/${newOwner}/${newRepo}) with the target plugin topic.\n\nMerge this PR to start tracking it.`
         });
 
-        // 5. Add label
+        // 7. Add label
         await octokit.rest.issues.addLabels({
             owner: prOwner,
             repo: prRepo,
@@ -89,11 +125,11 @@ export async function createPullRequestForNewRepo(newOwner, newRepo) {
         console.log(`  Pull Request created successfully: ${prData.html_url} with label bot:indexing`);
         return true;
     } catch (error) {
-        if (error.message.includes("A pull request already exists")) {
+        if (error.message && error.message.includes("A pull request already exists")) {
             console.log(`  Pull request already exists for ${newOwner}/${newRepo}.`);
             return true;
         }
-        console.error(`Error creating PR for ${newOwner}/${newRepo}:`, error.message);
+        console.error(`Error creating/updating PR for ${newOwner}/${newRepo}:`, error.message);
         return false;
     }
 }
