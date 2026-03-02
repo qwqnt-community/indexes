@@ -113,7 +113,21 @@ async function main() {
 
         const allUpdates = [];
         for (const repo of readyToProcessRepos) {
-            const result = await processRepo(repo, oldDataMap.get(`${repo.owner}/${repo.repo}`));
+            const oldData = oldDataMap.get(`${repo.owner}/${repo.repo}`);
+
+            // 如果仓库归档了，停止追踪它
+            if (repo.archived) {
+                console.log(`Repository ${repo.owner}/${repo.repo} is archived. Checking for existing tracked data to remove...`);
+                // 如果之前追踪过，尝试删掉旧消息并抛弃该仓库
+                if (oldData && oldData.message_id) {
+                    const { deleteMessage } = await import("./telegram/bot.js");
+                    console.log(`  Deleting archive repo pinned message ${oldData.message_id}...`);
+                    await deleteMessage(oldData.message_id);
+                }
+                continue; // 抛弃，不放入 allUpdates，下次就不会被算作 tracked
+            }
+
+            const result = await processRepo(repo, oldData);
             if (result) allUpdates.push(result);
         }
 

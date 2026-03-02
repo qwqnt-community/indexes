@@ -36,6 +36,8 @@ export async function findTargetRepositories() {
                 }
 
                 for (const item of data.items) {
+                    if (item.archived) continue;
+
                     const repoKey = `${item.owner.login}/${item.name}`;
                     if (processedRepos.has(repoKey)) continue;
 

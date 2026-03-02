@@ -205,6 +205,7 @@ export async function getRepoInfo(owner, repo) {
             description: data.description || "",
             default_branch: data.default_branch || "main",
             stars: data.stargazers_count || 0,
+            archived: data.archived || false,
         };
     } catch (error) {
         console.error(`Error fetching repo info for ${owner}/${repo}:`, error.message);
