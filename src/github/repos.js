@@ -8,6 +8,51 @@ if (GITHUB_REPOSITORY) {
 }
 
 /**
+ * 自动删除已经被追踪的仓库的 indexing 分支（说明 PR 已被合并）
+ * @param {Array<{owner: string, repo: string}>} trackedRepos 
+ */
+export async function cleanupMergedPrBranches(trackedRepos) {
+    if (!prOwner || !prRepo) return;
+
+    try {
+        const { data: refs } = await octokit.rest.git.listMatchingRefs({
+            owner: prOwner,
+            repo: prRepo,
+            ref: 'heads/indexing/'
+        });
+
+        // 将 trackedRepos 转为 Set 方便查找
+        const trackedSet = new Set(trackedRepos.map(r => `${r.owner}/${r.repo}`));
+
+        for (const ref of refs) {
+            // ref.ref 的格式为: refs/heads/indexing/owner/repo
+            const match = ref.ref.match(/^refs\/heads\/indexing\/([^/]+)\/([^/]+)$/);
+            if (match) {
+                const [, owner, repo] = match;
+                if (trackedSet.has(`${owner}/${repo}`)) {
+                    console.log(`Repository ${owner}/${repo} is now tracked. Deleting its PR branch ${ref.ref}...`);
+                    try {
+                        await octokit.rest.git.deleteRef({
+                            owner: prOwner,
+                            repo: prRepo,
+                            // deleteRef API 需要传递去掉 'refs/' 前缀的值，或者直接传 'heads/...'
+                            ref: `heads/indexing/${owner}/${repo}`
+                        });
+                        console.log(`  Branch deleted successfully.`);
+                    } catch (delErr) {
+                        console.error(`  Failed to delete branch ${ref.ref}:`, delErr.message);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        if (error.status !== 404) {
+            console.error("Error cleaning up PR branches:", error.message);
+        }
+    }
+}
+
+/**
  * 为第三方仓库创建 Pull Request 以添加到追踪列表
  * @param {string} newOwner 
  * @param {string} newRepo 

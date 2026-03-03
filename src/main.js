@@ -3,7 +3,8 @@ import {
     getRecentCommits,
     getLatestReleaseInfo,
     getRepoInfo,
-    createPullRequestForNewRepo
+    createPullRequestForNewRepo,
+    cleanupMergedPrBranches
 } from "./github/repos.js";
 import { getRepoData, getAllTrackedRepos, batchSaveRepoData } from "./github/data.js";
 import { syncRepoMessage } from "./telegram/bot.js";
@@ -98,6 +99,10 @@ async function main() {
         if (externalNewRepos.length > 0) {
             console.log(`Discovered ${externalNewRepos.length} external untracked repositories. Will create PRs for them.`);
         }
+
+        // 清理已合并的 PR 分支
+        console.log("Cleaning up merged PR branches...");
+        await cleanupMergedPrBranches(trackedRepos);
 
         // 处理并创建 PR
         for (const newRepo of externalNewRepos) {
