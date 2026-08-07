@@ -6,7 +6,7 @@
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
-    "grammy": "^1.36.2"
+    "grammy": "^1.45.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.1"

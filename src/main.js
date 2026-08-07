@@ -43,17 +43,22 @@ async function processRepo(repo, oldData) {
 
     console.log(forceResend ? `  Force resending...` : `  Release update detected...`);
 
-    const newMessageId = await syncRepoMessage(oldData?.message_id, {
-        ...repo,
-        releaseInfo,
-    });
+    const result = await syncRepoMessage(
+        oldData?.message_id,
+        {
+            ...repo,
+            releaseInfo,
+        },
+        oldData?.media_message_ids,
+    );
 
-    if (newMessageId) {
+    if (result) {
         console.log(`  Updated ${repo.owner}/${repo.repo} successfully`);
         return {
             owner: repo.owner,
             repo: repo.repo,
-            message_id: newMessageId,
+            message_id: result.message_id,
+            media_message_ids: result.media_message_ids || [],
             release_tag: releaseInfo.tagName,
         };
     }
@@ -139,6 +144,10 @@ async function main() {
                     const { deleteMessage } = await import("./telegram/bot.js");
                     console.log(`  Deleting archive repo pinned message ${oldData.message_id}...`);
                     await deleteMessage(oldData.message_id);
+                    for (const mediaMessageId of oldData.media_message_ids || []) {
+                        console.log(`  Deleting archive repo media message ${mediaMessageId}...`);
+                        await deleteMessage(mediaMessageId);
+                    }
                 }
                 continue; // 抛弃，不放入 allUpdates，下次就不会被算作 tracked
             }
