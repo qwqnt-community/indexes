@@ -360,6 +360,10 @@ export function formatRichMessage(context) {
 
     if (description && description.trim()) {
         head += `   ${escapeHtml(description)}\n`;
+    } else {
+        // 描述为空时 head 以悬空的 <br> 结尾：<br> 的换行与后续段落空行叠加会多出一行，
+        // 将 <br> 替换为普通换行，使 details 前的段落间隔与描述非空时一致
+        head = head.replace(/<br>\s*$/, "\n");
     }
 
     // 没有 Release 说明时省略折叠块
