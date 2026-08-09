@@ -118,13 +118,91 @@ export function truncateMarkdown(text, maxLength) {
 }
 
 /**
+ * 等待指定毫秒数
+ * @param {number} ms - 毫秒数
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 全局 429 限流冷却截止时间戳（毫秒），所有 Telegram API 调用共享，
+// 一旦限流，后续请求（包括其他仓库的发送）都会先等待冷却结束
+let rateLimitUntil = 0;
+
+/**
+ * 从 grammY 错误中提取 429 限流剩余秒数
+ * Telegram API 会在 429 响应的 parameters.retry_after 中返回剩余等待秒数
+ * @param {Error} error - grammY 抛出的错误（GrammyError）
+ * @returns {number|null} - 剩余秒数；非限流错误返回 null
+ */
+function getRetryAfterSeconds(error) {
+    // 以 error_code === 429 为主判断；仅在 error_code 缺失时（如网络层错误）
+    // 才用 message 包含 "429" 兜底，避免非限流错误（如 500）因文本巧合被误判
+    const isRateLimit =
+        error?.error_code === 429 ||
+        (error?.error_code === undefined && String(error?.message ?? "").includes("429"));
+    if (!isRateLimit) return null;
+    const seconds = Number(error?.parameters?.retry_after);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : 5;
+}
+
+/**
+ * 记录 429 限流冷却时间（额外加 2 秒缓冲），
+ * 之后所有请求先等待冷却结束
+ * @param {Error} error - grammY 抛出的错误
+ */
+function recordRateLimit(error) {
+    const retryAfter = getRetryAfterSeconds(error);
+    if (retryAfter === null) return;
+    rateLimitUntil = Math.max(rateLimitUntil, Date.now() + (retryAfter + 2) * 1000);
+}
+
+/**
+ * 若处于限流冷却期，等待其结束
+ * @returns {Promise<void>}
+ */
+async function waitIfRateLimited() {
+    const remaining = rateLimitUntil - Date.now();
+    if (remaining > 0) {
+        console.log(`  Rate limited, waiting ${Math.ceil(remaining / 1000)}s before next Telegram request...`);
+        await sleep(remaining);
+    }
+}
+
+/**
+ * 带 429 限流退避的 Telegram API 调用包装：
+ * 每次调用前等待冷却；429 时按 retry_after 记录冷却并重试，
+ * 重试耗尽后抛错（全局冷却仍生效，后续请求会继续等待）
+ * @template T
+ * @param {() => Promise<T>} fn - API 调用
+ * @param {object} [options]
+ * @param {number} [options.maxRetries] - 最多重试次数（默认 3）
+ * @returns {Promise<T>}
+ */
+async function withRateLimitRetry(fn, { maxRetries = 3 } = {}) {
+    for (let attempt = 0; ; attempt++) {
+        await waitIfRateLimited();
+        try {
+            return await fn();
+        } catch (error) {
+            const retryAfter = getRetryAfterSeconds(error);
+            if (retryAfter === null) throw error;
+            recordRateLimit(error);
+            if (attempt >= maxRetries) throw error;
+            console.log(`  429 rate limited, retrying in ${retryAfter + 2}s (attempt ${attempt + 1}/${maxRetries})...`);
+        }
+    }
+}
+
+/**
  * 删除消息
  * @param {number} messageId - 消息ID
  * @returns {Promise<boolean>}
  */
 export async function deleteMessage(messageId) {
     try {
-        await bot.api.deleteMessage(TG_GROUP_ID, messageId);
+        await withRateLimitRetry(() => bot.api.deleteMessage(TG_GROUP_ID, messageId));
         return true;
     } catch (error) {
         console.error(`Error deleting message ${messageId}:`, error.message);
@@ -357,7 +435,9 @@ async function sendReleaseAssets(owner, repo, assets, otherParams) {
 
     try {
         if (mediaGroup.length === 1) {
-            const { message_id } = await bot.api.sendDocument(TG_GROUP_ID, mediaGroup[0].media, { ...otherParams });
+            const { message_id } = await withRateLimitRetry(() =>
+                bot.api.sendDocument(TG_GROUP_ID, mediaGroup[0].media, { ...otherParams })
+            );
             return [message_id];
         }
 
@@ -368,7 +448,9 @@ async function sendReleaseAssets(owner, repo, assets, otherParams) {
 
         const itemsToSend = mediaGroup.slice(0, 10);
 
-        const messages = await bot.api.sendMediaGroup(TG_GROUP_ID, itemsToSend, groupParams);
+        const messages = await withRateLimitRetry(() =>
+            bot.api.sendMediaGroup(TG_GROUP_ID, itemsToSend, groupParams)
+        );
         return messages.map((message) => message.message_id);
     } catch (error) {
         console.error(`  Failed to send release assets for ${owner}/${repo}:`, error.message);
@@ -422,26 +504,41 @@ export async function syncRepoMessage(oldMessageId, context, oldMediaMessageIds 
 
     // 主路径：Rich Message
     let messageId = null;
+    let richRateLimited = false;
     try {
         const richParams = {};
         if (TG_GROUP_TOPIC_ID) {
             richParams.message_thread_id = parseInt(TG_GROUP_TOPIC_ID);
         }
-        const { message_id } = await bot.api.sendRichMessage(
-            TG_GROUP_ID,
-            { markdown: richText },
-            richParams,
+        const { message_id } = await withRateLimitRetry(() =>
+            bot.api.sendRichMessage(
+                TG_GROUP_ID,
+                { markdown: richText },
+                richParams,
+            )
         );
         messageId = message_id;
     } catch (richErr) {
+        richRateLimited = getRetryAfterSeconds(richErr) !== null;
         console.error(`  Failed to send Rich Message for ${owner}/${repo}:`, richErr.message);
     }
 
     // 回退：MarkdownV2 文本
     if (!messageId) {
+        // 429 限流时回退只会再次触发限流（且拉长冷却），直接放弃本次发送
+        if (richRateLimited) {
+            console.error(`  Skipping MarkdownV2 fallback for ${owner}/${repo}: still rate limited`);
+            for (const mediaMessageId of mediaMessageIds) {
+                await deleteMessage(mediaMessageId);
+            }
+            return null;
+        }
+
         try {
             console.log(`  Falling back to sending MarkdownV2 text message for ${owner}/${repo}...`);
-            const { message_id } = await bot.api.sendMessage(TG_GROUP_ID, fallbackText, otherParams);
+            const { message_id } = await withRateLimitRetry(() =>
+                bot.api.sendMessage(TG_GROUP_ID, fallbackText, otherParams)
+            );
             messageId = message_id;
         } catch (error) {
             console.error(`Error sending message for ${owner}/${repo}:`, error.message);
