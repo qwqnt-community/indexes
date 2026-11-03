@@ -339,10 +339,15 @@ function truncateRichBody(body, maxBytes) {
  * Release 正文使用 GitHub Flavored Markdown 兼容语法直出，
  * 放入默认折叠（不设 open）的 <details> 块中
  * @param {object} context - 更新上下文
+ * @param {string[]} mediaIds - 已下载附件在 rich_message.media 中的标识
  * @returns {string} - 格式化后的 Rich Markdown 文本
  */
-export function formatRichMessage(context) {
+export function formatRichMessage(context, mediaIds = []) {
     const { owner, repo, description, releaseInfo } = context;
+    const attachments = mediaIds.map((id) =>
+        `<tg-document src="tg://document?id=${id}"></tg-document>`
+    ).join("\n\n");
+    const tail = attachments ? `\n\n${attachments}` : "";
 
     const repoPath = `${owner}/${repo}`;
     const repoUrl = `https://github.com/${repoPath}`;
@@ -368,7 +373,7 @@ export function formatRichMessage(context) {
 
     // 没有 Release 说明时省略折叠块
     const releaseMessage = releaseInfo?.body?.trim();
-    if (!releaseMessage) return head.trimEnd();
+    if (!releaseMessage) return head.trimEnd() + tail;
 
     // Rich Message 限制：32768 UTF-8 字节（见 @grammyjs/types rich.d.ts）
     const MAX_BYTES = 32768;
@@ -377,12 +382,13 @@ export function formatRichMessage(context) {
     const overhead =
         Buffer.byteLength(head, "utf8") +
         Buffer.byteLength(openTag, "utf8") +
-        Buffer.byteLength(closeTag, "utf8");
+        Buffer.byteLength(closeTag, "utf8") +
+        Buffer.byteLength(tail, "utf8");
     // 预留省略号后缀（\n… 4 字节）
     const maxBody = MAX_BYTES - overhead - 4;
 
     const body = truncateRichBody(releaseMessage.replace(/\r\n/g, "\n"), maxBody);
-    return `${head}\n${openTag}${body}${closeTag}`;
+    return `${head}\n${openTag}${body}${closeTag}${tail}`;
 }
 
 /**
@@ -405,20 +411,13 @@ async function downloadAsset(owner, repo, assetId) {
 }
 
 /**
- * 同步仓库消息（如果存在旧消息则删除，然后发送新消息）
- * @param {number|null} oldMessageId - 旧消息ID
- * @param {object} context - 更新上下文
- * @returns {Promise<number | null>} - 返回新消息ID
- */
-/**
- * 发送 release 附件为独立的媒体消息（Rich Message 媒体不支持 document）
+ * 下载 release 附件，供富文本主路径与独立媒体回退复用
  * @param {string} owner - 仓库所有者
  * @param {string} repo - 仓库名
  * @param {Array} assets - 附件列表
- * @param {object} otherParams - 公共发送参数
- * @returns {Promise<number[]>} 返回所有媒体消息 ID，失败返回空数组
+ * @returns {Promise<Array>} 已成功下载的 InputMediaDocument 列表
  */
-async function sendReleaseAssets(owner, repo, assets, otherParams) {
+async function downloadReleaseAssets(owner, repo, assets) {
     const mediaGroup = [];
 
     for (const asset of assets) {
@@ -435,37 +434,44 @@ async function sendReleaseAssets(owner, repo, assets, otherParams) {
         }
     }
 
-    if (mediaGroup.length === 0) return [];
+    return mediaGroup;
+}
 
+/**
+ * 富文本发送失败时，将已下载附件作为独立媒体消息发送
+ * @returns {Promise<number[]>} 已成功发送的媒体消息 ID
+ */
+async function sendReleaseAssets(owner, repo, mediaGroup, otherParams) {
+    const messageIds = [];
     try {
-        if (mediaGroup.length === 1) {
-            const { message_id } = await withRateLimitRetry(() =>
-                bot.api.sendDocument(TG_GROUP_ID, mediaGroup[0].media, { ...otherParams })
-            );
-            return [message_id];
+        for (let offset = 0; offset < mediaGroup.length; offset += 10) {
+            const batch = mediaGroup.slice(offset, offset + 10);
+            if (batch.length === 1) {
+                const { message_id } = await withRateLimitRetry(() =>
+                    bot.api.sendDocument(TG_GROUP_ID, batch[0].media, { ...otherParams })
+                );
+                messageIds.push(message_id);
+            } else {
+                const groupParams = {};
+                if (TG_GROUP_TOPIC_ID) {
+                    groupParams.message_thread_id = parseInt(TG_GROUP_TOPIC_ID);
+                }
+                const messages = await withRateLimitRetry(() =>
+                    bot.api.sendMediaGroup(TG_GROUP_ID, batch, groupParams)
+                );
+                messageIds.push(...messages.map((message) => message.message_id));
+            }
         }
-
-        const groupParams = {};
-        if (TG_GROUP_TOPIC_ID) {
-            groupParams.message_thread_id = parseInt(TG_GROUP_TOPIC_ID);
-        }
-
-        const itemsToSend = mediaGroup.slice(0, 10);
-
-        const messages = await withRateLimitRetry(() =>
-            bot.api.sendMediaGroup(TG_GROUP_ID, itemsToSend, groupParams)
-        );
-        return messages.map((message) => message.message_id);
     } catch (error) {
         console.error(`  Failed to send release assets for ${owner}/${repo}:`, error.message);
-        return [];
     }
+    return messageIds;
 }
 
 /**
  * 同步仓库消息（如果存在旧消息则删除，然后发送新消息）
- * 正文优先使用 Rich Message（Release 正文放默认折叠的 details 块），
- * 失败时回退 MarkdownV2；附件作为独立媒体消息发送
+ * 正文和附件合并为 Rich Message（Release 正文放默认折叠的 details 块），
+ * 失败时回退 MarkdownV2 正文与独立附件消息
  * @param {number|null} oldMessageId - 旧正文消息ID
  * @param {object} context - 更新上下文
  * @param {number[]} oldMediaMessageIds - 旧附件消息ID列表
@@ -483,8 +489,7 @@ export async function syncRepoMessage(oldMessageId, context, oldMediaMessageIds 
         await deleteMessage(mediaMessageId);
     }
 
-    // Rich Message（主路径）与 MarkdownV2（回退）两种格式
-    const richText = formatRichMessage(context);
+    // MarkdownV2 仅用于富文本发送失败后的回退
     const fallbackText = truncateMarkdown(formatRepoMessage(context), 4096);
     if (!fallbackText.trim()) {
         console.error(`Message text is empty for ${owner}/${repo}`);
@@ -500,11 +505,16 @@ export async function syncRepoMessage(oldMessageId, context, oldMediaMessageIds 
         otherParams.message_thread_id = parseInt(TG_GROUP_TOPIC_ID);
     }
 
-    // 附件作为独立媒体消息先发送（Rich Message 媒体不支持 document）
-    const hasAssets = releaseInfo?.assets?.length > 0;
-    const mediaMessageIds = hasAssets
-        ? await sendReleaseAssets(owner, repo, releaseInfo.assets, otherParams)
-        : [];
+    const mediaGroup = await downloadReleaseAssets(owner, repo, releaseInfo?.assets || []);
+    const richMedia = mediaGroup.map((media, index) => ({
+        id: `release_asset_${index}`,
+        media,
+    }));
+    const richMessage = {
+        markdown: formatRichMessage(context, richMedia.map(({ id }) => id)),
+        ...(richMedia.length > 0 ? { media: richMedia } : {}),
+    };
+    let mediaMessageIds = [];
 
     // 主路径：Rich Message
     let messageId = null;
@@ -517,7 +527,7 @@ export async function syncRepoMessage(oldMessageId, context, oldMediaMessageIds 
         const { message_id } = await withRateLimitRetry(() =>
             bot.api.sendRichMessage(
                 TG_GROUP_ID,
-                { markdown: richText },
+                richMessage,
                 richParams,
             )
         );
@@ -532,12 +542,10 @@ export async function syncRepoMessage(oldMessageId, context, oldMediaMessageIds 
         // 429 限流时回退只会再次触发限流（且拉长冷却），直接放弃本次发送
         if (richRateLimited) {
             console.error(`  Skipping MarkdownV2 fallback for ${owner}/${repo}: still rate limited`);
-            for (const mediaMessageId of mediaMessageIds) {
-                await deleteMessage(mediaMessageId);
-            }
             return null;
         }
 
+        mediaMessageIds = await sendReleaseAssets(owner, repo, mediaGroup, otherParams);
         try {
             console.log(`  Falling back to sending MarkdownV2 text message for ${owner}/${repo}...`);
             const { message_id } = await withRateLimitRetry(() =>
